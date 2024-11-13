@@ -1,0 +1,78 @@
+import gc
+import json
+import pprint
+import subprocess
+import pandas as pd
+import numpy as np
+import polars as pl
+pl.Config.set_tbl_cols(-1)  # codes for how DF table show in console
+pl.Config.set_tbl_rows(-1)
+
+labels_json = r"E:\credit card\train_fraud_labels.json"
+with open(labels_json, "r") as labels_json_:
+    labels_ = json.load(labels_json_)
+
+list_of_ids = []
+list_of_labels = []
+
+for key, nested_duct in labels_.items():  # Json file that have the label that tells us what transaction is fraud or not
+    # stored in Json and its structure is dict have only one key but have value of dict and inside of this dict have
+    # another dicts ,so we have to extraxt the data form the main key by the below code.
+    for key_ in nested_duct.keys():  # extract data from the nested dict
+        list_of_labels.append(key_)
+    for id_ in nested_duct.values():
+        list_of_ids.append(id_)
+
+
+list_of_data_paths = [r"E:\credit card\cards_data.csv", r"E:\credit card\transactions_data.csv",
+                      r"E:\credit card\users_data.csv"]
+#cards_data = pl.read_csv(list_of_data_paths[0])
+users_data = pl.read_csv(list_of_data_paths[2])
+#transaction_data = pl.scan_csv(list_of_data_paths[1])
+
+
+def split_data_to_parts(data_path: str):  # data was to big so tried to split them into 3 parts
+    list_of_stats = [0, 4435305, 8870610]
+    list_of_endings = [4435305, 8870610, 13305915]
+    for start, ending, part_name in zip(list_of_stats, list_of_endings, range(len(list_of_endings))):
+        transaction_data = pl.read_csv(data_path)[start:ending]
+        transaction_data.with_columns(pl.col("errors").fill_null("No error")).write_csv(
+            rf"E:\credit card\part{part_name}.csv")
+    print("Data successfully split and saved!")
+
+
+def clean_data(data: pl.DataFrame, col_name: str, *signs: str) -> pl.DataFrame:  # Function for automated cleaning
+    expr = pl.col(col_name)
+
+    # Apply replace_all for each sign
+    for sign in signs:
+        expr = expr.str.replace_all(rf'\{sign}', '')
+
+    # Final transformations
+    data = data.with_columns(
+        expr.str.strip_chars()
+        .cast(pl.Float64)
+    )
+    return data
+
+
+transaction_DS = pl.read_csv("E:\credit card\part0.csv")  # read a part of the dataset
+full_data = transaction_DS.join(users_data, left_on="client_id", right_on="id")  # Join dataset
+full_data = full_data.drop(["current_age", 'birth_year', 'birth_month', 'latitude', 'longitude', 'date', 'mcc',
+                            'client_id'])   # drop few columns
+full_data = full_data.with_columns(pl.col("zip").fill_null("0"))  # fill Null
+full_data = full_data.with_columns(pl.col("merchant_state").fill_null("Online"))
+
+
+for data_type, col_name in zip(full_data.dtypes, full_data.columns):    # remove unnecessary sign
+    if (data_type == pl.String and col_name != "use_chip" and col_name != "merchant_city" and
+            col_name != "merchant_state" and col_name != "errors" and col_name != "gender" and col_name != "address"
+            and col_name != "id"):
+        full_data = clean_data(full_data,col_name, "$", ",")
+
+
+label_df = pl.DataFrame({"target": list_of_ids, "id": list_of_labels})
+full_data = full_data.with_columns(pl.col("id").cast(str))
+full_data = full_data.join(label_df, on="id")
+
+full_data.write_csv(r"E:\credit card\transactional_data.csv")  # save file to add in Tableau
